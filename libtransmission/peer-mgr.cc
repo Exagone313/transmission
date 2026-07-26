@@ -382,6 +382,7 @@ public:
         [[nodiscard]] bool client_has_block(tr_block_index_t block) const override;
         [[nodiscard]] bool client_has_piece(tr_piece_index_t piece) const override;
         [[nodiscard]] bool client_wants_piece(tr_piece_index_t piece) const override;
+        [[nodiscard]] bool is_endgame() const override;
         [[nodiscard]] bool is_sequential_download() const override;
         [[nodiscard]] tr_piece_index_t sequential_download_from_piece() const override;
         [[nodiscard]] size_t count_piece_replication(tr_piece_index_t piece) const override;
@@ -1018,6 +1019,22 @@ bool tr_swarm::WishlistMediator::client_wants_piece(tr_piece_index_t piece) cons
     return tor_.piece_is_wanted(piece);
 }
 
+bool tr_swarm::WishlistMediator::is_endgame() const
+{
+    // We consider ourselves to be in endgame if the number of bytes we have
+    // requested is >= the number of bytes left to download. In other words,
+    // everything we still want has already been asked of somebody.
+    //
+    // N.B. `active_req_count()` is O(1), so this is O(peers).
+    auto const op = [](uint64_t acc, auto const& peer)
+    {
+        return acc + peer->active_req_count(TR_CLIENT_TO_PEER);
+    };
+    auto const n_active = std::accumulate(std::begin(swarm_.peers), std::end(swarm_.peers), uint64_t{}, op) +
+        std::accumulate(std::begin(swarm_.webseeds), std::end(swarm_.webseeds), uint64_t{}, op);
+    return n_active * tr_block_info::BlockSize >= tor_.left_until_done();
+}
+
 bool tr_swarm::WishlistMediator::is_sequential_download() const
 {
     return tor_.is_sequential_download();
@@ -1319,7 +1336,10 @@ std::vector<tr_block_span_t> tr_peerMgrGetNextRequests(tr_torrent* torrent, tr_p
     {
         return {};
     }
-    return swarm.wishlist->next(numwant, [peer](tr_piece_index_t p) { return peer->has_piece(p); });
+    return swarm.wishlist->next(
+        numwant,
+        [peer](tr_piece_index_t p) { return peer->has_piece(p); },
+        [peer](tr_block_index_t b) { return peer->active_requests.test(b); });
 }
 
 namespace

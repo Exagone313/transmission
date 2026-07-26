@@ -33,6 +33,12 @@ public:
         [[nodiscard]] virtual bool client_has_block(tr_block_index_t block) const = 0;
         [[nodiscard]] virtual bool client_has_piece(tr_piece_index_t piece) const = 0;
         [[nodiscard]] virtual bool client_wants_piece(tr_piece_index_t piece) const = 0;
+
+        // True when we have as many bytes of block requests in flight as we
+        // still need to finish the torrent, i.e. every block we still want has
+        // already been asked of somebody. See Wishlist::Impl::next().
+        [[nodiscard]] virtual bool is_endgame() const = 0;
+
         [[nodiscard]] virtual bool is_sequential_download() const = 0;
         [[nodiscard]] virtual tr_piece_index_t sequential_download_from_piece() const = 0;
         [[nodiscard]] virtual size_t count_piece_replication(tr_piece_index_t piece) const = 0;
@@ -78,10 +84,15 @@ public:
     explicit Wishlist(Mediator& mediator_in);
     ~Wishlist();
 
-    // the next blocks that we should request from a peer
+    // the next blocks that we should request from a peer.
+    //
+    // `peer_has_active_request` tells the wishlist which blocks the peer is
+    // already downloading. It is only consulted during endgame, when a block
+    // may be requested from more than one peer at a time.
     [[nodiscard]] std::vector<tr_block_span_t> next(
         size_t n_wanted_blocks,
-        std::function<bool(tr_piece_index_t)> const& peer_has_piece);
+        std::function<bool(tr_piece_index_t)> const& peer_has_piece,
+        std::function<bool(tr_block_index_t)> const& peer_has_active_request = {});
 
 private:
     class Impl;

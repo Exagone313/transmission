@@ -110,7 +110,8 @@ public:
 
     [[nodiscard]] std::vector<tr_block_span_t> next(
         size_t n_wanted_blocks,
-        std::function<bool(tr_piece_index_t)> const& peer_has_piece);
+        std::function<bool(tr_piece_index_t)> const& peer_has_piece,
+        std::function<bool(tr_block_index_t)> const& peer_has_active_request);
 
 private:
     TR_CONSTEXPR20 void dec_replication() noexcept
@@ -574,7 +575,8 @@ Wishlist::Impl::Impl(Mediator& mediator_in)
 
 std::vector<tr_block_span_t> Wishlist::Impl::next(
     size_t const n_wanted_blocks,
-    std::function<bool(tr_piece_index_t)> const& peer_has_piece)
+    std::function<bool(tr_piece_index_t)> const& peer_has_piece,
+    std::function<bool(tr_block_index_t)> const& peer_has_active_request)
 {
     if (n_wanted_blocks == 0U)
     {
@@ -605,9 +607,62 @@ std::vector<tr_block_span_t> Wishlist::Impl::next(
         std::copy_n(std::rbegin(candidate.unrequested), n_to_add, std::back_inserter(blocks));
     }
 
-    // Ensure the list of blocks are sorted
-    // The list needs to be unique as well, but that should come naturally
+    // Endgame.
+    //
+    // Outside of endgame the wishlist hands each block to a single peer, and a
+    // block only returns to the pool on choke / reject / cancel / disconnect.
+    // At the tail of a download that lets one slow or unresponsive peer hold
+    // the last blocks hostage while every other peer sits idle -- the classic
+    // "stuck at 99.9%" symptom.
+    //
+    // So once everything we still want is already in flight, let a second peer
+    // race for those blocks, the way 3.00 and 4.0.x did. When the block finally
+    // lands, tr_swarm::cancel_all_requests_for_block() cancels the losers.
+    if (std::size(blocks) < n_wanted_blocks && mediator_.is_endgame())
+    {
+        for (auto const& candidate : candidates_)
+        {
+            if (std::size(blocks) >= n_wanted_blocks)
+            {
+                break;
+            }
+
+            if (candidate.replication == 0 || !peer_has_piece(candidate.piece))
+            {
+                continue;
+            }
+
+            for (auto [block, end] = candidate.block_span; block < end && std::size(blocks) < n_wanted_blocks; ++block)
+            {
+                // not in flight: either already offered by the loop above, or
+                // it is not ours to hand out twice
+                if (candidate.unrequested.contains(block))
+                {
+                    continue;
+                }
+
+                // we already have it, it just hasn't been checksummed yet
+                if (mediator_.client_has_block(block))
+                {
+                    continue;
+                }
+
+                // no point asking the same peer twice
+                if (peer_has_active_request && peer_has_active_request(block))
+                {
+                    continue;
+                }
+
+                blocks.push_back(block);
+            }
+        }
+    }
+
+    // Ensure the list of blocks is sorted and unique. Uniqueness comes
+    // naturally from the first loop, but the endgame loop above walks whole
+    // block spans, so be explicit about it.
     std::sort(std::begin(blocks), std::end(blocks));
+    blocks.erase(std::unique(std::begin(blocks), std::end(blocks)), std::end(blocks));
     return make_spans(blocks);
 }
 
@@ -645,7 +700,8 @@ Wishlist::~Wishlist() = default;
 
 std::vector<tr_block_span_t> Wishlist::next(
     size_t const n_wanted_blocks,
-    std::function<bool(tr_piece_index_t)> const& peer_has_piece)
+    std::function<bool(tr_piece_index_t)> const& peer_has_piece,
+    std::function<bool(tr_block_index_t)> const& peer_has_active_request)
 {
-    return impl_->next(n_wanted_blocks, peer_has_piece);
+    return impl_->next(n_wanted_blocks, peer_has_piece, peer_has_active_request);
 }
