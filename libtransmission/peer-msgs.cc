@@ -459,6 +459,10 @@ public:
             set_client_interested(interested);
             protocol_send_interest(interested);
             update_active(TR_PEER_TO_CLIENT);
+
+            // make sure this is after we send the "interested" msg
+            update_desired_request_count();
+            maybe_send_block_requests();
         }
     }
 
@@ -1463,6 +1467,7 @@ ReadResult tr_peerMsgsImpl::process_peer_message(uint8_t id, MessageReader& payl
         }
 
         update_active(TR_PEER_TO_CLIENT);
+        update_desired_request_count(); // set desired request count to 0
         break;
 
     case BtPeerMsgs::Unchoke:
@@ -1470,6 +1475,7 @@ ReadResult tr_peerMsgsImpl::process_peer_message(uint8_t id, MessageReader& payl
         set_client_choked(false);
         update_active(TR_PEER_TO_CLIENT);
         update_desired_request_count();
+        maybe_send_block_requests();
         break;
 
     case BtPeerMsgs::Interested:
@@ -1500,6 +1506,10 @@ ReadResult tr_peerMsgsImpl::process_peer_message(uint8_t id, MessageReader& payl
             have_.set(ui32);
             peer_info->set_seed(is_seed());
             publish(tr_peer_event::GotHave(ui32));
+
+            // make sure this is after publishing the event, so that the wishlist
+            // will have the latest info when choosing blocks to request
+            maybe_send_block_requests();
         }
 
         break;
@@ -1510,6 +1520,11 @@ ReadResult tr_peerMsgsImpl::process_peer_message(uint8_t id, MessageReader& payl
         have_.set_raw(reinterpret_cast<uint8_t const*>(std::data(payload)), std::size(payload));
         peer_info->set_seed(is_seed());
         publish(tr_peer_event::GotBitfield(&have_));
+
+        // make sure these are after publishing the event, so that the wishlist
+        // will have the latest info when choosing blocks to request
+        update_desired_request_count();
+        maybe_send_block_requests();
         break;
 
     case BtPeerMsgs::Request:
@@ -1610,6 +1625,11 @@ ReadResult tr_peerMsgsImpl::process_peer_message(uint8_t id, MessageReader& payl
             have_.set_has_all();
             peer_info->set_seed();
             publish(tr_peer_event::GotHaveAll());
+
+            // make sure these are after publishing the event, so that the wishlist
+            // will have the latest info when choosing blocks to request
+            update_desired_request_count();
+            maybe_send_block_requests();
         }
         else
         {
@@ -1648,6 +1668,12 @@ ReadResult tr_peerMsgsImpl::process_peer_message(uint8_t id, MessageReader& payl
                 if (auto const block = tor_.piece_loc(r.index, r.offset).block; active_requests.test(block))
                 {
                     active_requests.unset(block);
+
+                    // Make sure maybe_send_block_requests() is called before returning the
+                    // block to the wishlist, so that it will choose a block other than the
+                    // rejected one.
+                    maybe_send_block_requests();
+
                     publish(tr_peer_event::GotRejected(tor_.block_info(), block));
                 }
             }
@@ -1860,6 +1886,14 @@ ReadState tr_peerMsgsImpl::can_read(tr_peerIo* io, void* vmsgs, size_t* piece)
     current_message_type.reset();
     current_payload.clear();
 
+    // If we received piece data then we may have freed up quota for new
+    // requests. Ask for them now instead of waiting for the next pulse.
+    if (n_piece_bytes_read > 0U && read_state != ReadState::Err)
+    {
+        msgs->update_desired_request_count();
+        msgs->maybe_send_block_requests();
+    }
+
     return read_state;
 }
 
@@ -1901,7 +1935,9 @@ void tr_peerMsgsImpl::maybe_send_metadata_requests(time_t now) const
 
 void tr_peerMsgsImpl::maybe_send_block_requests()
 {
-    if (!tor_.client_can_download())
+    // N.B. this is now called from message handlers as well as from pulse(),
+    // so the interested/choked preconditions are checks rather than asserts.
+    if (!tor_.client_can_download() || !client_is_interested() || client_is_choked())
     {
         return;
     }
@@ -1911,9 +1947,6 @@ void tr_peerMsgsImpl::maybe_send_block_requests()
     {
         return;
     }
-
-    TR_ASSERT(client_is_interested());
-    TR_ASSERT(!client_is_choked());
 
     auto const n_wanted = desired_request_count_ - n_active;
     if (auto const requests = tr_peerMgrGetNextRequests(&tor_, this, n_wanted); !std::empty(requests))
