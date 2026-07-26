@@ -30,6 +30,7 @@ protected:
         mutable std::set<tr_block_index_t> client_has_block_;
         mutable std::set<tr_piece_index_t> client_has_piece_;
         mutable std::set<tr_piece_index_t> client_wants_piece_;
+        bool is_endgame_ = false;
         bool is_sequential_download_ = false;
         tr_piece_index_t sequential_download_from_piece_ = 0;
 
@@ -53,6 +54,11 @@ protected:
         [[nodiscard]] bool client_wants_piece(tr_piece_index_t piece) const override
         {
             return client_wants_piece_.count(piece) != 0;
+        }
+
+        [[nodiscard]] bool is_endgame() const override
+        {
+            return is_endgame_;
         }
 
         [[nodiscard]] bool is_sequential_download() const override
@@ -331,6 +337,62 @@ TEST_F(PeerMgrWishlistTest, doesNotRequestSameBlockTwice)
     EXPECT_EQ(240U, requested.count());
     EXPECT_EQ(0U, requested.count(0, 10));
     EXPECT_EQ(240U, requested.count(10, 250));
+}
+
+TEST_F(PeerMgrWishlistTest, endgameRequestsInFlightBlocksFromASecondPeer)
+{
+    auto mediator = MockMediator{ *this };
+
+    // setup: one piece of 10 blocks, all missing
+    mediator.block_span_[0] = { 0, 10 };
+    mediator.piece_replication_[0] = 2;
+    mediator.client_wants_piece_.insert(0);
+
+    // allow the wishlist to build its cache
+    auto wishlist = Wishlist{ mediator };
+
+    // a first peer has already been given every block
+    sent_request_.emit(nullptr, nullptr, { 0, 10 });
+
+    // outside of endgame a second peer gets nothing, which is what lets a
+    // single slow peer stall the tail of a download
+    EXPECT_TRUE(std::empty(wishlist.next(10, PeerHasAllPieces)));
+
+    // in endgame it should be offered the in-flight blocks instead
+    mediator.is_endgame_ = true;
+    auto spans = wishlist.next(10, PeerHasAllPieces);
+    auto requested = tr_bitfield{ 10 };
+    for (auto const& [begin, end] : spans)
+    {
+        requested.set_span(begin, end);
+    }
+    EXPECT_EQ(10U, requested.count());
+
+    // ...but not the blocks it is already downloading itself
+    static auto constexpr PeerIsDownloadingFirstHalf = [](tr_block_index_t b)
+    {
+        return b < 5U;
+    };
+    spans = wishlist.next(10, PeerHasAllPieces, PeerIsDownloadingFirstHalf);
+    requested = tr_bitfield{ 10 };
+    for (auto const& [begin, end] : spans)
+    {
+        requested.set_span(begin, end);
+    }
+    EXPECT_EQ(5U, requested.count());
+    EXPECT_EQ(0U, requested.count(0, 5));
+    EXPECT_EQ(5U, requested.count(5, 10));
+
+    // and never blocks we already have
+    mediator.client_has_block_.insert(9);
+    spans = wishlist.next(10, PeerHasAllPieces);
+    requested = tr_bitfield{ 10 };
+    for (auto const& [begin, end] : spans)
+    {
+        requested.set_span(begin, end);
+    }
+    EXPECT_EQ(9U, requested.count());
+    EXPECT_EQ(0U, requested.count(9, 10));
 }
 
 TEST_F(PeerMgrWishlistTest, sequentialDownload)
