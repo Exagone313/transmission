@@ -395,6 +395,43 @@ TEST_F(PeerMgrWishlistTest, endgameRequestsInFlightBlocksFromASecondPeer)
     EXPECT_EQ(0U, requested.count(9, 10));
 }
 
+TEST_F(PeerMgrWishlistTest, endgameHandlesRequestOfAlreadyRequestedBlocks)
+{
+    auto mediator = MockMediator{ *this };
+
+    // setup: two pieces of 10 blocks, all missing
+    mediator.block_span_[0] = { 0, 10 };
+    mediator.block_span_[1] = { 10, 20 };
+    mediator.piece_replication_[0] = 2;
+    mediator.piece_replication_[1] = 2;
+    mediator.client_wants_piece_.insert(0);
+    mediator.client_wants_piece_.insert(1);
+    mediator.is_endgame_ = true;
+
+    // allow the wishlist to build its cache
+    auto wishlist = Wishlist{ mediator };
+
+    // a first peer has been given every block, so both candidates now have
+    // an empty `unrequested` set
+    sent_request_.emit(nullptr, nullptr, { 0, 20 });
+
+    // a second peer gets the same blocks in endgame...
+    auto const spans = wishlist.next(20, PeerHasAllPieces);
+    auto requested = tr_bitfield{ 20 };
+    for (auto const& [begin, end] : spans)
+    {
+        requested.set_span(begin, end);
+    }
+    EXPECT_EQ(20U, requested.count());
+
+    // ...and telling the wishlist about it must not walk off the end of the
+    // now-empty `unrequested` sets
+    for (auto const& span : spans)
+    {
+        sent_request_.emit(nullptr, nullptr, span);
+    }
+}
+
 TEST_F(PeerMgrWishlistTest, sequentialDownload)
 {
     auto const get_spans = [this](size_t n_wanted)

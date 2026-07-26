@@ -194,15 +194,20 @@ private:
                 break;
             }
 
-            auto& unreq = it_p->unrequested;
+            // N.B. an empty `unrequested` is reachable during endgame, when we
+            // deliberately re-request blocks that are already in flight. The
+            // bounds arithmetic below dereferences begin()/prev(end()), so it
+            // must not run on an empty set.
+            if (auto& unreq = it_p->unrequested; !std::empty(unreq))
+            {
+                auto it_b_end = std::end(unreq);
+                it_b_end = *std::prev(it_b_end) >= block_span.begin ? it_b_end : unreq.upper_bound(block_span.begin);
 
-            auto it_b_end = std::end(unreq);
-            it_b_end = *std::prev(it_b_end) >= block_span.begin ? it_b_end : unreq.upper_bound(block_span.begin);
+                auto it_b_begin = std::begin(unreq);
+                it_b_begin = *it_b_begin < block_span.end ? it_b_begin : unreq.upper_bound(block_span.end);
 
-            auto it_b_begin = std::begin(unreq);
-            it_b_begin = *it_b_begin < block_span.end ? it_b_begin : unreq.upper_bound(block_span.end);
-
-            unreq.erase(it_b_begin, it_b_end);
+                unreq.erase(it_b_begin, it_b_end);
+            }
 
             block = it_p->block_span.end;
 
